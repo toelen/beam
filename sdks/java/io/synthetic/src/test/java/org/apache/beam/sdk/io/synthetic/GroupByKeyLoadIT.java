@@ -32,6 +32,7 @@ import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
+import org.joda.time.Duration;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
@@ -44,7 +45,7 @@ public class GroupByKeyLoadIT {
 
   private static Options options;
 
-  private static SyntheticBoundedIO.SyntheticSourceOptions syntheticSourceOptions;
+  private static SyntheticBoundedIO.SyntheticSourceOptions sourceOptions;
 
   @Rule public TestPipeline pipeline = TestPipeline.create();
 
@@ -62,6 +63,12 @@ public class GroupByKeyLoadIT {
     Integer getFanout();
 
     void setFanout(Integer shuffleFanout);
+
+    @Description("The number of reiterations to perform")
+    @Default.Integer(1)
+    Integer getIterations();
+
+    void setIterations(Integer shuffleFanout);
   }
 
   @BeforeClass
@@ -72,59 +79,43 @@ public class GroupByKeyLoadIT {
         PipelineOptionsValidator.validate(
             Options.class, TestPipeline.testingPipelineOptions().as(Options.class));
 
-    syntheticSourceOptions = fromString(options.getInputOptions());
+    sourceOptions = fromString(options.getInputOptions());
   }
 
   @Test
   public void groupByKeyLoadTest() {
-    PCollection<KV<byte[], byte[]>> input =
-        pipeline.apply(SyntheticBoundedIO.readFrom(syntheticSourceOptions));
+    PCollection<KV<byte[], byte[]>> input = pipeline.apply(SyntheticBoundedIO.readFrom(sourceOptions));
 
+    // fanout
     for (int branch = 0; branch < options.getFanout(); branch++) {
-      groupAndUngroup(input, branch);
+      input
+        .apply(ParDo.of(new SyntheticStep(stepOptions)))
+        .apply("Group", GroupByKey.create())
+        .apply("Ungroup and reiterate", ParDo.of(new DoFn<KV<byte[], Iterable<byte[]>>, KV<byte[], byte[]>>() {
+              Integer iterations = options.getIterations();
+
+              @ProcessElement
+              public void processElement(ProcessContext c) {
+                byte[] key = c.element().getKey();
+
+                // Reiterate 10 times emit output once
+                for (int i = 0; i < iterations; i++) {
+                  for (byte[] value : c.element().getValue()) {
+
+                    if (i == iterations - 1) {
+                      c.output(KV.of(key, value));
+                    }
+                  }
+                }
+              }
+            }));
     }
 
     pipeline.run().waitUntilFinish();
   }
 
-  // TODO: Is this a proper fanout test?
-  private void groupAndUngroup(PCollection<KV<byte[], byte[]>> input, int branchNumber) {
-    // TODO: Should we add the Synthetic step here?
 
-    PCollection<KV<byte[], Iterable<byte[]>>> groupedData =
-        input.apply(String.format("Group by key (%s)", branchNumber), GroupByKey.create());
 
-    groupedData.apply(
-        String.format("Ungroup (%s)", branchNumber), ParDo.of(new UngroupFn()));
-  }
-
-  // TODO: remove in case you're sure that we don't perform this
-  private void groupAndUngroupNTimesSequentially(
-      final PCollection<KV<byte[], byte[]>> input, final Integer n) {
-    if (n == 0) {
-      return;
-    } else {
-      // TODO: synthetic step?
-      PCollection<KV<byte[], Iterable<byte[]>>> groupedCollection =
-          input.apply(String.format("Group by key no: %s.", n), GroupByKey.create());
-
-      PCollection<KV<byte[], byte[]>> nextInput =
-          groupedCollection.apply(
-              String.format("Ungroup by key no: %s.", n), ParDo.of(new UngroupFn()));
-
-      groupAndUngroupNTimesSequentially(nextInput, n - 1);
-    }
-  }
-
-  // TODO: I skipped the getIterations() option usage. I'm still not sure if we should use it here.
-  private static class UngroupFn extends DoFn<KV<byte[], Iterable<byte[]>>, KV<byte[], byte[]>> {
-
-    @ProcessElement
-    public void processElement(ProcessContext c) {
-      byte[] key = c.element().getKey();
-      for (byte[] value : c.element().getValue()) {
-        c.output(KV.of(key, value));
-      }
     }
   }
 }

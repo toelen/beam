@@ -82,11 +82,10 @@ public class CombineLoadIT {
     PCollection<KV<byte[], byte[]>> input =
         pipeline.apply(SyntheticBoundedIO.readFrom(syntheticSourceOptions));
 
-    PCollection<Integer> numbers =
-        input.apply("Get numbers from bytes", ParDo.of(new ByteToIntFn()));
-
     for (int branch = 0; branch < options.getFanout(); branch++) {
-      numbers.apply(String.format("Combine (%s)", branch), Mean.globally());
+      input.apply(ParDo.of(new SyntheticStep(stepOptions)))
+        .apply("Get numbers from bytes", ParDo.of(new ByteToIntFn()))
+        .apply("Combine", Mean.globally());
     }
     pipeline.run().waitUntilFinish();
   }

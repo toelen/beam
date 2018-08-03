@@ -90,6 +90,12 @@ public class SideInputLoadIT {
     SideInputType getSideInputType();
 
     void setSideInputType(SideInputType sideInputType);
+
+    @Description("The number of reiterations to perform")
+    @Default.Integer(1)
+    Integer getIterations();
+
+    void setIterations(Integer iterations);
   }
 
   @BeforeClass
@@ -104,64 +110,48 @@ public class SideInputLoadIT {
     sideInputOptions = fromString(options.getSideInputOptions());
   }
 
-  // TODO: Should this be a fanout test too?
   @Test
   public void sideInputLoadTest() {
     PCollection<KV<byte[], byte[]>> input =
-        pipeline.apply("Read input", SyntheticBoundedIO.readFrom(inputOptions));
+        pipeline.apply(SyntheticBoundedIO.readFrom(inputOptions));
 
-    PCollection<KV<byte[], byte[]>> sideInputCollection =
-        pipeline.apply("Read side input", SyntheticBoundedIO.readFrom(sideInputOptions));
+    PCollectionView<Iterable<KV<byte[], byte[]>>> sideInput = pipeline
+            .apply(SyntheticBoundedIO.readFrom(inputOptions))
+            .apply(View.asIterable());
 
-    SideInputType sideInputType = options.getSideInputType();
+    input
+        .apply(ParDo.of(new SyntheticStep(stepOptions)))
+        .apply(ParDo.of(
+                    new DoFn<KV<byte[], byte[]>, KV<byte[], byte[]>>() {
+                      @ProcessElement
+                      public void processElement(ProcessContext c) {
+                        Iterable<KV<byte[], byte[]>> si = c.sideInput(sideInput);
 
-    if (sideInputType == ITERABLE) {
-      PCollectionView<Iterable<KV<byte[], byte[]>>> sideInput =
-          sideInputCollection.apply(View.asIterable());
-      input.apply(ParDo.of(new ConsumeIterable(sideInput)).withSideInputs(sideInput));
-    } else if (sideInputType == MAP) {
-
-      // For the sake of example completeness I used multimap here,
-      // because Map requires none key duplicates in the PCollection (otherwise fails).
-      // TODO: Should we GroupByKey or Combine.perKey() and use asMap() here?
-      PCollectionView<Map<byte[], Iterable<byte[]>>> sideInput = sideInputCollection
-          .apply(View.asMultimap());
-      input.apply(ParDo.of(new ConsumeMap(sideInput)).withSideInputs(sideInput));
-    }
-
+                        // Retiterate
+                        for (int i = 0; i < options.getIterations(); i++) {
+                          for (KV<byte[], byte[]> sideInputElement : si) {
+                            // for every _input_ element iterate over all _sideInput_ elements
+                            // count consumed bytes, examine memory usage, etc (Metrics API).
+                          }
+                        }
+                      }
+                    })
+                .withSideInputs(sideInput));
     pipeline.run().waitUntilFinish();
   }
 
-
   /*
-  * TODO:
-  *
-  * Should we use metrics API, as in the Side input gist?
-  * (https://gist.github.com/pabloem/eeb97d25ebda43db09ff9b875f61f127)
-  *
-  * Do I think correctly, that we should also use the metrics api in all other tests to
-  * gather more data about the test runs (or is it out of scope, at least for now)?
-  *
-  */
+   * TODO:
+   *
+   * Should we use metrics API, as in the Side input gist?
+   * (https://gist.github.com/pabloem/eeb97d25ebda43db09ff9b875f61f127)
+   *
+   * Do I think correctly, that we should also use the metrics api in all other tests to
+   * gather more data about the test runs (or is it out of scope, at least for now)?
+   *
+   */
 
   /* For every element, iterate over the whole iterable side input. */
-  private static class ConsumeIterable extends DoFn<KV<byte[], byte[]>, KV<byte[], byte[]>> {
-
-    private PCollectionView<Iterable<KV<byte[], byte[]>>> sideInput;
-
-    ConsumeIterable(PCollectionView<Iterable<KV<byte[], byte[]>>> sideInput) {
-      this.sideInput = sideInput;
-    }
-
-    @ProcessElement
-    public void processElement(ProcessContext c) {
-      Iterable<KV<byte[], byte[]>> sideInput = c.sideInput(this.sideInput);
-
-      for (KV<byte[], byte[]> sideInputElement : sideInput) {
-        // TODO: count consumed bytes with the metrics API.
-      }
-    }
-  }
 
   /* For every element, find its corresponding value in side input. */
   private static class ConsumeMap extends DoFn<KV<byte[], byte[]>, KV<byte[], byte[]>> {
@@ -178,11 +168,11 @@ public class SideInputLoadIT {
 
       Iterable<byte[]> bytes = map.get(c.element().getKey());
 
-//      if(bytes == null) {
-//        // TODO: missing key
-//      } else {
-//        // TODO: found key
-//      }
+      //      if(bytes == null) {
+      //        // TODO: missing key
+      //      } else {
+      //        // TODO: found key
+      //      }
     }
   }
 }
